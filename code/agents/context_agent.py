@@ -29,6 +29,7 @@ from datetime import timedelta
 from data.loader import DataLoader
 from utils.logger import AgentLogger
 from utils.usage_tracker import UsageTracker
+from utils.json_parsing import strip_json_fences
 
 MODEL = "claude-sonnet-5"
 
@@ -73,18 +74,19 @@ Conflict resolution precedence, in order:
 linked_event_id on an event points to an EARLIER event in the same
 transaction or investment lifecycle, not a later one.
 
-For each event you are given, decide:
-- keep: true if this event should be treated as a real, distinct
-  financial event; false if it should be discarded (a duplicate
-  representation of another event, a record fully superseded by
-  another, or noise).
-- effective_amount: the amount to use for this event after applying
-  any amendment described in the messages, in the event's original
-  currency, not converted. If no amendment applies, use the event's
-  own amount.
-- effective_status: the status to use after applying any amendment,
-  e.g. an event confirmed cancelled by a message should have
-  effective_status="cancelled" even if the raw status says otherwise.
+Most events need no change at all. Only include an event in your
+"events" output if at least one of these applies to it:
+- it should be discarded entirely (a duplicate representation of
+  another event, a record fully superseded by another, or noise):
+  set "keep": false
+- a message changes its amount and/or status (a cancellation,
+  amendment, or correction): set "keep": true and give the corrected
+  "effective_amount" (in the event's own original currency, not
+  converted) and/or "effective_status"
+
+Do NOT include an event in "events" if it needs no change. An event
+you omit is automatically kept exactly as given. Do not restate every
+event, list only the exceptions.
 
 Then produce an amendments list: one entry per event_id that a
 message caused you to change or explicitly confirm, with action one
@@ -94,6 +96,7 @@ Respond with ONLY a JSON object, no other text, no markdown fences,
 matching exactly this shape:
 {{
   "events": [
+    {{"event_id": "...", "keep": false}},
     {{"event_id": "...", "keep": true, "effective_amount": 0.0, "effective_status": "..."}}
   ],
   "amendments": [
@@ -144,6 +147,22 @@ def _json_safe(value):
     if isinstance(value, (int, float, str, bool)):
         return value
     return str(value)
+
+
+def _safe_int(value, default=None):
+    """
+    Input: value (any), default (int or None)
+    Output: int, or default if value is blank/NaN
+
+    A bare int() on a blank pandas float (NaN) raises "cannot convert
+    float NaN to integer" with no context about which field caused
+    it. This was hitting max_installment_months on profiles that
+    leave it blank, crashing almost every request before Sonnet or
+    Haiku were ever involved.
+    """
+    if _is_blank(value):
+        return default
+    return int(value)
 
 
 def _split_list(value) -> list[str]:
@@ -371,7 +390,7 @@ class ContextAgent:
 
         kwargs = dict(
             model=MODEL,
-            max_tokens=4096,
+            max_tokens=8192,
             system=SYSTEM_PROMPT,
             thinking=thinking,
             messages=[{"role": "user", "content": json.dumps(payload)}],
@@ -389,10 +408,11 @@ class ContextAgent:
 
         raw_text = "".join(block.text for block in response.content if block.type == "text")
         try:
-            parsed = json.loads(raw_text)
+            parsed = json.loads(strip_json_fences(raw_text))
         except json.JSONDecodeError as exc:
             raise ContextAgentResponseError(
-                f"ContextAgent response for request_id={request_id!r} was not valid JSON: {exc}"
+                f"ContextAgent response for request_id={request_id!r} was not valid JSON "
+                f"(stop_reason={response.stop_reason!r}, raw_text={raw_text[:300]!r}): {exc}"
             ) from exc
 
         self._usage_tracker.record(
@@ -415,7 +435,12 @@ class ContextAgent:
 
     def _build_events(self, bundle: dict, resolution: dict) -> list[dict]:
         """
-        Input: bundle (dict), resolution (dict) - Sonnet's parsed output
+        Input: bundle (dict), resolution (dict) - Sonnet's parsed
+            output. resolution["events"] only lists EXCEPTIONS (an
+            event to discard, or one a message changed); an event_id
+            absent from it is kept unchanged, per the sparse-output
+            prompt design (asking the model to restate every event
+            was overflowing max_tokens for users with many events).
         Output: list[dict] - the "events" section of the Context Dict
             Contract, plus a flexibility (str) field carrying the raw
             flexibility column value through, per project decision.
@@ -427,11 +452,11 @@ class ContextAgent:
         result = []
         for event_id, raw in raw_by_id.items():
             decision = resolved_by_id.get(event_id)
-            if decision is None or not decision.get("keep", False):
+            if decision is not None and not decision.get("keep", True):
                 continue
 
-            amount = decision.get("effective_amount", raw["amount"])
-            status = decision.get("effective_status", raw["status"])
+            amount = decision.get("effective_amount", raw["amount"]) if decision else raw["amount"]
+            status = decision.get("effective_status", raw["status"]) if decision else raw["status"]
 
             as_of = raw["event_date"]
             as_of = as_of.date() if hasattr(as_of, "date") else as_of
@@ -467,10 +492,13 @@ class ContextAgent:
         """
         result = []
         for opt in bundle["payment_options"]:
+            n = _safe_int(opt["number_of_payments"])
+            freq = _safe_int(opt["payment_frequency_days"])
+            if n is None or freq is None:
+                continue
+
             first_date = opt["first_payment_date"]
             first_date = first_date.date() if hasattr(first_date, "date") else first_date
-            n = int(opt["number_of_payments"])
-            freq = int(opt["payment_frequency_days"])
             schedule = [
                 {"date": first_date + timedelta(days=freq * i), "amount": opt["payment_amount"]}
                 for i in range(n)
@@ -498,7 +526,7 @@ class ContextAgent:
             "home_currency": p["home_currency"],
             "priorities": _split_list(p["financial_priorities"]),
             "payment_methods": _split_list(p["payment_methods_user_will_consider"]),
-            "max_installment_months": int(p["max_installment_months"]),
+            "max_installment_months": _safe_int(p["max_installment_months"], default=0),
             "categories_protect": _split_list(p["expense_categories_to_protect"]),
             "categories_reduce": _split_list(p["expense_categories_user_is_willing_to_reduce"]),
             "categories_stop": _split_list(p["expense_categories_user_is_willing_to_stop"]),
