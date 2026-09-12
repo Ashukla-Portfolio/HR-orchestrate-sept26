@@ -9,3 +9,4 @@ code/engines/__pycache__/plan_engine.cpython-314.pyc
 code/engines/__pycache__/validator.cpython-314.pyc
 code/utils/__pycache__/logger.cpython-314.pyc
 code/utils/__pycache__/usage_tracker.cpython-314.pyc
+code/test_log.txt

@@ -28,14 +28,11 @@ from utils.logger import AgentLogger
 DAY_OF_MONTH_TOLERANCE = 3
 AMOUNT_SIMILARITY_TOLERANCE = 0.15
 
-# A second, separate recurring signal: a (category, direction)
-# combination with at least this many total historical occurrences is
-# treated as an ongoing recurring pattern too, even without a matching
-# description or a consistent day-of-month. Catches high-frequency,
-# variable-vendor spending (groceries, dining, transport) that the
-# exact-match detection above can't, confirmed against real data
-# where these categories use a different description every time and
-# don't land on a consistent day of the month.
+# A (category, direction) combination with at least this many total
+# historical occurrences and more than one distinct description is
+# treated as an ongoing "frequent" recurring pattern (groceries,
+# dining, transport-style categories: a different vendor every time,
+# no consistent day of the month).
 FREQUENT_CATEGORY_MIN_OCCURRENCES = 3
 
 
@@ -79,72 +76,96 @@ def _amounts_similar(a1: float, a2: float) -> bool:
     return abs(a1 - a2) / larger <= AMOUNT_SIMILARITY_TOLERANCE
 
 
-def _detect_recurring_event_ids(events: list[dict]) -> set[str]:
+def _has_monthly_pattern(group_events: list[dict]) -> bool:
+    """
+    Input: group_events (list[dict]) - same category+direction,
+        already confirmed to share one description
+    Output: bool, True if any pair falls in consecutive calendar
+        months, lands on the same day of the month (within
+        tolerance), and has similar amounts.
+    """
+    for i, a in enumerate(group_events):
+        for b in group_events[i + 1:]:
+            if abs(_month_index(a["event_date"]) - _month_index(b["event_date"])) != 1:
+                continue
+            if not _day_position_matches(a["event_date"], b["event_date"]):
+                continue
+            if not _amounts_similar(a["amount"], b["amount"]):
+                continue
+            return True
+    return False
+
+
+def _classify_recurrence(events: list[dict]) -> dict[str, str | None]:
     """
     Input: events (list[dict]), all financial_events rows for one user
-    Output: set[str], event_ids identified as recurring
+    Output: dict, event_id -> "monthly" | "frequent" | None
 
-    Groups events by (event_type, description, category, direction,
-    currency). Within each group, if any two events fall in
-    consecutive calendar months, land on the same day of the month
-    (within tolerance), and have similar amounts, every event_id in
-    that group is marked recurring.
+    Classifies at the (category, direction) level, not per event or
+    per description, and never by category name.
+
+    Primary check: find the most common ("dominant") description
+    within the group, and require it to account for a strict majority
+    (more than half) of the group's total occurrences, not merely be
+    the single most common one among many roughly-equally-common
+    vendor descriptions. Without the majority requirement, a small
+    coincidentally-matching subset (e.g. 4 "Commuter pass" rows out of
+    26 total, otherwise-varied transport events) can still swing an
+    entire heterogeneous category to monthly, exactly the failure
+    this whole category-level approach was meant to avoid. With a
+    true majority required, if that dominant description's own
+    occurrences fall in consecutive months on the same day (within
+    tolerance) with similar amounts, the WHOLE group (every event,
+    including any differently-worded minority outlier, e.g. a
+    "Scheduled utility debit" row alongside many "Municipal
+    utilities" ones) is monthly.
+
+    Fallback, only when the primary check finds no pattern: if any
+    event in the group is a CREDIT with status "scheduled", trust the
+    whole group as an ongoing monthly income series anchored on that
+    event. This catches sparse income history (a new job: one
+    prorated first paycheck, worded and amount-wise unlike the next
+    one, too few rows to statistically confirm a pattern) without
+    naming "salary": it's restricted to credit specifically because,
+    checked against the real data, every debit-direction "scheduled"
+    row observed was a one-off due bill (an outstanding balance, a
+    payable), not a recurring signal, while every credit-direction
+    "scheduled" row was the next confirmed instance of ongoing income.
+    A scheduled debit doesn't carry the same "this will keep
+    recurring" implication a scheduled credit does.
+
+    Otherwise: 3+ total occurrences of the (category, direction)
+    combination, regardless of description, is a frequent pattern
+    (groceries, dining, transport-style spending: a different vendor
+    each time, no consistent day of the month).
     """
-    groups: dict[tuple, list[dict]] = defaultdict(list)
+    by_cat_dir: dict[tuple, list[dict]] = defaultdict(list)
     for event in events:
-        key = (
-            event.get("event_type"),
-            event.get("description"),
-            event.get("category"),
-            event.get("direction"),
-            event.get("currency"),
-        )
-        groups[key].append(event)
+        by_cat_dir[(event.get("category"), event.get("direction"))].append(event)
 
-    recurring_ids: set[str] = set()
-    for group_events in groups.values():
-        if len(group_events) < 2:
-            continue
-        found = False
-        for i, a in enumerate(group_events):
-            for b in group_events[i + 1:]:
-                if abs(_month_index(a["event_date"]) - _month_index(b["event_date"])) != 1:
-                    continue
-                if not _day_position_matches(a["event_date"], b["event_date"]):
-                    continue
-                if not _amounts_similar(a["amount"], b["amount"]):
-                    continue
-                found = True
-                break
-            if found:
-                break
-        if found:
-            recurring_ids.update(e["event_id"] for e in group_events)
+    result: dict[str, str | None] = {e["event_id"]: None for e in events}
 
-    return recurring_ids
+    for (_category, direction), group_events in by_cat_dir.items():
+        description_counts: dict = defaultdict(int)
+        for e in group_events:
+            description_counts[e.get("description")] += 1
+        dominant_description = max(description_counts, key=description_counts.get)
+        dominant_events = [e for e in group_events if e.get("description") == dominant_description]
+        is_majority = len(dominant_events) > len(group_events) / 2
 
+        is_monthly = is_majority and len(dominant_events) >= 2 and _has_monthly_pattern(dominant_events)
 
-def _detect_frequent_category_ids(events: list[dict]) -> set[str]:
-    """
-    Input: events (list[dict]), all financial_events rows for one user
-    Output: set[str], event_ids belonging to a (category, direction)
-        combination with at least FREQUENT_CATEGORY_MIN_OCCURRENCES
-        total occurrences. This flags the category as recurring at
-        all (used for PlanEngine's spending-change eligibility); the
-        request-relative decision of how much to project forward
-        into a specific 90-day forecast is ForecastEngine's job, not
-        this one, since that needs a lookback window anchored to the
-        request date, which this user-level function doesn't have.
-    """
-    groups: dict[tuple, list[str]] = defaultdict(list)
-    for event in events:
-        key = (event.get("category"), event.get("direction"))
-        groups[key].append(event["event_id"])
+        if not is_monthly and direction == "credit":
+            if any(e.get("status") == "scheduled" for e in group_events):
+                is_monthly = True
 
-    result: set[str] = set()
-    for ids in groups.values():
-        if len(ids) >= FREQUENT_CATEGORY_MIN_OCCURRENCES:
-            result.update(ids)
+        if is_monthly:
+            for e in group_events:
+                result[e["event_id"]] = "monthly"
+        elif len(group_events) >= FREQUENT_CATEGORY_MIN_OCCURRENCES:
+            for e in group_events:
+                result[e["event_id"]] = "frequent"
+
     return result
 
 
@@ -246,35 +267,18 @@ class DataLoader:
         Input: user_id (str)
         Output: list[dict], all financial_events.csv rows for this
             user, in original order, each with is_recurring (bool)
-            and recurrence_pattern (str or None) attached.
-            recurrence_pattern is "monthly" (exact description + same
-            day-of-month, e.g. rent, subscriptions, salary),
-            "frequent" (3+ occurrences of the same category+direction
-            regardless of description or day, e.g. groceries, dining,
-            transport), or None. Exposed explicitly, not just as the
-            is_recurring boolean, because ForecastEngine needs to
-            know which projection mechanism applies to each event:
-            some categories (groceries) have a few descriptions that
-            coincidentally repeat exactly, which would otherwise get
-            mis-grouped into the monthly mechanism even though they
-            don't actually land on a consistent day of the month.
-            financial_events.csv has no request_id column, so this is
-            deliberately unfiltered by request, matching events to a
-            request is ContextAgent's job, using related_event_id
-            values from messages/images.
+            and recurrence_pattern (str or None) attached, from
+            _classify_recurrence (category-level classification, see
+            its docstring). financial_events.csv has no request_id
+            column, so this is deliberately unfiltered by request,
+            matching events to a request is ContextAgent's job, using
+            related_event_id values from messages/images.
         """
         matches = self._events[self._events["user_id"] == user_id]
         records = matches.to_dict(orient="records")
-        monthly_ids = _detect_recurring_event_ids(records)
-        frequent_ids = _detect_frequent_category_ids(records) - monthly_ids
+        patterns = _classify_recurrence(records)
         for record in records:
-            eid = record["event_id"]
-            if eid in monthly_ids:
-                record["recurrence_pattern"] = "monthly"
-            elif eid in frequent_ids:
-                record["recurrence_pattern"] = "frequent"
-            else:
-                record["recurrence_pattern"] = None
+            record["recurrence_pattern"] = patterns[record["event_id"]]
             record["is_recurring"] = record["recurrence_pattern"] is not None
         return records
 

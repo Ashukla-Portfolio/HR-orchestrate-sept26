@@ -84,11 +84,15 @@ def _add_one_month_same_day(d: date, anchor_day: int) -> date:
 def group_key(event: dict) -> tuple:
     """
     Input: event (dict) - a resolved event from the Context Dict
-    Output: tuple, the "monthly" recurring-series grouping key,
-        matching what DataLoader's exact-match detection used:
-        (type, description, category, direction).
+    Output: tuple, (category, direction). Every monthly-pattern
+        category in this dataset (rent, utilities, subscriptions,
+        debt payments, salary) is already category-specific enough
+        per user that type/description aren't needed to disambiguate,
+        and dropping them is what lets differently-worded rows for
+        the same underlying series (e.g. "Prorated first salary" vs
+        "Next confirmed salary") group together correctly.
     """
-    return (event["type"], event.get("description"), event["category"], event["direction"])
+    return (event["category"], event["direction"])
 
 
 class ForecastEngine:
