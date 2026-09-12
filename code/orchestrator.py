@@ -21,8 +21,10 @@ silently invents a confident-looking number.
 import csv
 import os
 import time
+from pathlib import Path
 
 import anthropic
+from dotenv import load_dotenv
 
 from agents.context_agent import ContextAgent, determine_effort_level, gather_request_bundle
 from agents.explanation_agent import ExplanationAgent
@@ -33,6 +35,13 @@ from engines.plan_engine import PlanEngine
 from engines.validator import ValidatorAgent
 from utils.logger import AgentLogger
 from utils.usage_tracker import UsageTracker
+
+# Loaded here, not in main.py, so every entrypoint that constructs an
+# Orchestrator gets ANTH_API_KEY regardless of which script does the
+# importing. Explicit path (this file's own directory, code/.env) since
+# dotenv's default cwd-relative lookup won't find it when run per the
+# README's instructions (cwd is the repo root, not code/).
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 MAX_ATTEMPTS = 3
 RETRY_DELAY_SECONDS = 2
@@ -143,16 +152,20 @@ class Orchestrator:
 
         return self._fallback_row(request_id, last_error)
 
-    def _run_pipeline_once(self, request_id: str) -> dict:
+    def _run_pipeline_once(self, request_id: str, request_override: dict | None = None) -> dict:
         """
-        Input: request_id (str)
+        Input:
+            request_id (str)
+            request_override (dict or None) - passed through to
+                gather_request_bundle; lets test code run this same
+                pipeline against a sample_requests.csv row
         Output: dict, one validated output row
 
         One full attempt: gather -> ContextAgent -> PlanEngine ->
         ExplanationAgent -> ValidatorAgent. Raises on any failure,
         caller decides whether to retry.
         """
-        bundle = gather_request_bundle(request_id, self._data_loader)
+        bundle = gather_request_bundle(request_id, self._data_loader, request_override=request_override)
         effort = determine_effort_level(bundle)
         context = self._context_agent.build_context(bundle, effort)
         plan = self._plan_engine.build_plan(context)

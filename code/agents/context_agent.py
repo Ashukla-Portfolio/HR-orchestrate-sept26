@@ -159,9 +159,17 @@ def _split_list(value) -> list[str]:
     return [item.strip() for item in str(value).split("|") if item.strip()]
 
 
-def gather_request_bundle(request_id: str, data_loader: DataLoader) -> dict:
+def gather_request_bundle(request_id: str, data_loader: DataLoader, request_override: dict | None = None) -> dict:
     """
-    Input: request_id (str), data_loader (DataLoader)
+    Input:
+        request_id (str)
+        data_loader (DataLoader)
+        request_override (dict or None) - if provided, used as the
+            "request" row instead of calling
+            data_loader.get_request(request_id). Lets test code (e.g.
+            against sample_requests.csv) reuse this function without
+            requiring the sample's request_id to exist in
+            requests.csv.
     Output: dict with keys: request, profile, messages, images,
         payment_options, events. events is ALL of this user's
         financial_events.csv rows: that file has no request_id
@@ -171,7 +179,7 @@ def gather_request_bundle(request_id: str, data_loader: DataLoader) -> dict:
         evaluated. messages and images ARE scoped to this request_id,
         since those files do have that column.
     """
-    request = data_loader.get_request(request_id)
+    request = request_override if request_override is not None else data_loader.get_request(request_id)
     user_id = request["user_id"]
     profile = data_loader.get_profile(user_id)
     messages = data_loader.get_messages_for_request(request_id)

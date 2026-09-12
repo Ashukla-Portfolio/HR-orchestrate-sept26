@@ -1,1 +1,11 @@
 code/.env
+code/__pycache__/orchestrator.cpython-314.pyc
+code/agents/__pycache__/context_agent.cpython-314.pyc
+code/agents/__pycache__/image_agent.cpython-314.pyc
+code/agents/__pycache__/explanation_agent.cpython-314.pyc
+code/data/__pycache__/loader.cpython-314.pyc
+code/engines/__pycache__/forecast_engine.cpython-314.pyc
+code/engines/__pycache__/plan_engine.cpython-314.pyc
+code/engines/__pycache__/validator.cpython-314.pyc
+code/utils/__pycache__/logger.cpython-314.pyc
+code/utils/__pycache__/usage_tracker.cpython-314.pyc

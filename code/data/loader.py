@@ -151,6 +151,9 @@ class DataLoader:
             base / "exchange_rates.csv", parse_dates=["rate_date"]
         ).sort_values("rate_date")
 
+        self._base_dir = base
+        self._sample_requests = None
+
         self._requests = self._requests.set_index("request_id", drop=False)
         self._profiles = self._profiles.set_index("user_id", drop=False)
 
@@ -162,6 +165,21 @@ class DataLoader:
             over every request that needs a prediction.
         """
         return list(self._requests["request_id"])
+
+    def get_sample_requests(self) -> list[dict]:
+        """
+        Input: none
+        Output: list[dict], every row in sample_requests.csv, request
+            fields plus the ground-truth output fields. Loaded lazily
+            on first call, this is test-only data, never needed
+            during a real submission run over requests.csv.
+        """
+        if self._sample_requests is None:
+            path = self._base_dir / "sample_requests.csv"
+            self._sample_requests = pd.read_csv(
+                path, parse_dates=["request_date", "desired_completion_date"]
+            )
+        return self._sample_requests.to_dict(orient="records")
 
     def get_request(self, request_id: str) -> dict:
         """
