@@ -28,6 +28,16 @@ from utils.logger import AgentLogger
 DAY_OF_MONTH_TOLERANCE = 3
 AMOUNT_SIMILARITY_TOLERANCE = 0.15
 
+# A second, separate recurring signal: a (category, direction)
+# combination with at least this many total historical occurrences is
+# treated as an ongoing recurring pattern too, even without a matching
+# description or a consistent day-of-month. Catches high-frequency,
+# variable-vendor spending (groceries, dining, transport) that the
+# exact-match detection above can't, confirmed against real data
+# where these categories use a different description every time and
+# don't land on a consistent day of the month.
+FREQUENT_CATEGORY_MIN_OCCURRENCES = 3
+
 
 class MissingExchangeRateError(Exception):
     """Raised when no exchange rate exists for a currency pair on or before the requested date."""
@@ -112,6 +122,30 @@ def _detect_recurring_event_ids(events: list[dict]) -> set[str]:
             recurring_ids.update(e["event_id"] for e in group_events)
 
     return recurring_ids
+
+
+def _detect_frequent_category_ids(events: list[dict]) -> set[str]:
+    """
+    Input: events (list[dict]), all financial_events rows for one user
+    Output: set[str], event_ids belonging to a (category, direction)
+        combination with at least FREQUENT_CATEGORY_MIN_OCCURRENCES
+        total occurrences. This flags the category as recurring at
+        all (used for PlanEngine's spending-change eligibility); the
+        request-relative decision of how much to project forward
+        into a specific 90-day forecast is ForecastEngine's job, not
+        this one, since that needs a lookback window anchored to the
+        request date, which this user-level function doesn't have.
+    """
+    groups: dict[tuple, list[str]] = defaultdict(list)
+    for event in events:
+        key = (event.get("category"), event.get("direction"))
+        groups[key].append(event["event_id"])
+
+    result: set[str] = set()
+    for ids in groups.values():
+        if len(ids) >= FREQUENT_CATEGORY_MIN_OCCURRENCES:
+            result.update(ids)
+    return result
 
 
 class DataLoader:
@@ -211,19 +245,37 @@ class DataLoader:
         """
         Input: user_id (str)
         Output: list[dict], all financial_events.csv rows for this
-            user, in original order, each with a computed
-            is_recurring (bool) field attached. financial_events.csv
-            has no request_id column, so this is deliberately
-            unfiltered by request. Matching events to a request is
-            ContextAgent's job, using related_event_id values from
-            messages/images. is_recurring is determined by
-            _detect_recurring_event_ids, not by any raw column.
+            user, in original order, each with is_recurring (bool)
+            and recurrence_pattern (str or None) attached.
+            recurrence_pattern is "monthly" (exact description + same
+            day-of-month, e.g. rent, subscriptions, salary),
+            "frequent" (3+ occurrences of the same category+direction
+            regardless of description or day, e.g. groceries, dining,
+            transport), or None. Exposed explicitly, not just as the
+            is_recurring boolean, because ForecastEngine needs to
+            know which projection mechanism applies to each event:
+            some categories (groceries) have a few descriptions that
+            coincidentally repeat exactly, which would otherwise get
+            mis-grouped into the monthly mechanism even though they
+            don't actually land on a consistent day of the month.
+            financial_events.csv has no request_id column, so this is
+            deliberately unfiltered by request, matching events to a
+            request is ContextAgent's job, using related_event_id
+            values from messages/images.
         """
         matches = self._events[self._events["user_id"] == user_id]
         records = matches.to_dict(orient="records")
-        recurring_ids = _detect_recurring_event_ids(records)
+        monthly_ids = _detect_recurring_event_ids(records)
+        frequent_ids = _detect_frequent_category_ids(records) - monthly_ids
         for record in records:
-            record["is_recurring"] = record["event_id"] in recurring_ids
+            eid = record["event_id"]
+            if eid in monthly_ids:
+                record["recurrence_pattern"] = "monthly"
+            elif eid in frequent_ids:
+                record["recurrence_pattern"] = "frequent"
+            else:
+                record["recurrence_pattern"] = None
+            record["is_recurring"] = record["recurrence_pattern"] is not None
         return records
 
     def get_event(self, event_id: str) -> dict | None:

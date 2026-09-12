@@ -19,7 +19,7 @@ from pathlib import Path
 
 from utils.logger import AgentLogger
 from utils.usage_tracker import UsageTracker
-from utils.json_parsing import strip_json_fences
+from utils.json_parsing import extract_json_object, strip_json_fences
 
 MODEL = "claude-haiku-4-5"
 
@@ -153,7 +153,7 @@ class ImageAgent:
                             ),
                         },
                     ],
-                }
+                },
             ],
         )
 
@@ -166,11 +166,14 @@ class ImageAgent:
         raw_text = "".join(block.text for block in response.content if block.type == "text")
         try:
             parsed = json.loads(strip_json_fences(raw_text))
-        except json.JSONDecodeError as exc:
-            raise ImageAgentResponseError(
-                f"ImageAgent response for image_id={image_id!r} was not valid JSON "
-                f"(stop_reason={response.stop_reason!r}, raw_text={raw_text[:300]!r}): {exc}"
-            ) from exc
+        except json.JSONDecodeError:
+            try:
+                parsed = json.loads(extract_json_object(raw_text))
+            except json.JSONDecodeError as exc:
+                raise ImageAgentResponseError(
+                    f"ImageAgent response for image_id={image_id!r} was not valid JSON "
+                    f"(stop_reason={response.stop_reason!r}, raw_text={raw_text[:300]!r}): {exc}"
+                ) from exc
 
         amount = parsed.get("amount")
         if amount is None:

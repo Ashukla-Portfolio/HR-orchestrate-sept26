@@ -29,7 +29,7 @@ from datetime import timedelta
 from data.loader import DataLoader
 from utils.logger import AgentLogger
 from utils.usage_tracker import UsageTracker
-from utils.json_parsing import strip_json_fences
+from utils.json_parsing import extract_json_object, strip_json_fences
 
 MODEL = "claude-sonnet-5"
 
@@ -372,6 +372,12 @@ class ContextAgent:
         extended/adaptive thinking as ordinary output_tokens, there is
         no separate thinking-token count in the API's usage object on
         any model.
+
+        No assistant-message prefill: claude-sonnet-5 rejects it
+        outright ("This model does not support assistant message
+        prefill"), not just when thinking is enabled, confirmed
+        against the real API. Relies on strip_json_fences and
+        extract_json_object instead.
         """
         request_id = bundle["request"]["request_id"]
 
@@ -407,13 +413,17 @@ class ContextAgent:
             )
 
         raw_text = "".join(block.text for block in response.content if block.type == "text")
+
         try:
             parsed = json.loads(strip_json_fences(raw_text))
-        except json.JSONDecodeError as exc:
-            raise ContextAgentResponseError(
-                f"ContextAgent response for request_id={request_id!r} was not valid JSON "
-                f"(stop_reason={response.stop_reason!r}, raw_text={raw_text[:300]!r}): {exc}"
-            ) from exc
+        except json.JSONDecodeError:
+            try:
+                parsed = json.loads(extract_json_object(raw_text))
+            except json.JSONDecodeError as exc:
+                raise ContextAgentResponseError(
+                    f"ContextAgent response for request_id={request_id!r} was not valid JSON "
+                    f"(stop_reason={response.stop_reason!r}, raw_text={raw_text[:300]!r}): {exc}"
+                ) from exc
 
         self._usage_tracker.record(
             model=MODEL,
@@ -475,6 +485,7 @@ class ContextAgent:
                 "event_date": raw["event_date"],
                 "settlement_date": raw["settlement_date"],
                 "is_recurring": raw["is_recurring"],
+                "recurrence_pattern": raw.get("recurrence_pattern"),
                 "is_flexible": flexibility != "fixed",
                 "flexibility": flexibility,
                 "min_allowed": min_allowed,

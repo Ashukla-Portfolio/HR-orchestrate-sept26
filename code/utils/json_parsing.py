@@ -10,6 +10,25 @@ to hold every time.
 """
 
 
+def extract_json_object(text: str) -> str:
+    """
+    Input: text (str) - a model response that should be JSON, but may
+        instead be prose that happens to contain a JSON object
+        somewhere in it (seen in practice: the model reasoning out
+        loud about an ambiguous case instead of complying with the
+        "respond with only JSON" instruction)
+    Output: str - the substring from the first "{" to the last "}",
+        or the original text unchanged if no "{" is found at all.
+        This is a last-resort fallback, tried only after a direct
+        parse (and fence-stripping) has already failed.
+    """
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        return text
+    return text[start : end + 1]
+
+
 def strip_json_fences(text: str) -> str:
     """
     Input: text (str) - a model response expected to be raw JSON

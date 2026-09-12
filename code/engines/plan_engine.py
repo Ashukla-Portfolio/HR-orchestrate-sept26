@@ -12,7 +12,7 @@ Changes, and Installment Plans sections, and the problem statement's
 "Choosing Between Safe Plans" section.
 """
 
-from engines.forecast_engine import ForecastEngine, group_key
+from engines.forecast_engine import ForecastEngine, as_date
 
 MAX_SPENDING_CHANGES = 3
 STOP_CAPABLE = {"stoppable", "reducible_or_stoppable"}
@@ -60,8 +60,8 @@ class PlanEngine:
         """
         request = context["request"]
         profile = context["profile"]
-        request_date = request["date"]
-        desired_date = request["desired_date"]
+        request_date = as_date(request["date"])
+        desired_date = as_date(request["desired_date"])
         requested_amount = request["amount"]
         min_balance = profile["min_balance"]
         payment_methods = set(profile["payment_methods"])
@@ -265,7 +265,11 @@ class PlanEngine:
             Tries changes largest-cash-freed first, one at a time,
             stopping as soon as is_safe passes, so the result uses
             the fewest changes needed rather than always using the
-            maximum allowed.
+            maximum allowed. Deduped by (category, direction) rather
+            than the finer monthly-pattern group_key, since that key
+            treats every "frequent" pattern event (groceries, dining,
+            transport, a different description each time) as its own
+            separate series, defeating dedup for those categories.
         """
         eligible = self._eligible_flexible_events(context)
 
@@ -274,32 +278,33 @@ class PlanEngine:
             event = entry["event"]
             stop_gain = abs(event["amount_home"]) if entry["can_stop"] else -1
             reduce_gain = (abs(event["amount_home"]) - event["min_allowed"]) if entry["can_reduce"] else -1
+            dedup_key = (event["category"], event["direction"])
             if stop_gain >= reduce_gain and entry["can_stop"]:
                 scored.append({
                     "event_id": event["event_id"], "action": "stop", "new_amount": None,
-                    "gain": stop_gain, "group_key": group_key(event),
+                    "gain": stop_gain, "dedup_key": dedup_key,
                 })
             elif entry["can_reduce"] and reduce_gain > 0:
                 scored.append({
                     "event_id": event["event_id"], "action": "reduce_to", "new_amount": event["min_allowed"],
-                    "gain": reduce_gain, "group_key": group_key(event),
+                    "gain": reduce_gain, "dedup_key": dedup_key,
                 })
 
         scored.sort(key=lambda c: c["gain"], reverse=True)
 
-        seen_groups = set()
+        seen = set()
         deduped = []
         for c in scored:
-            if c["group_key"] in seen_groups:
+            if c["dedup_key"] in seen:
                 continue
-            seen_groups.add(c["group_key"])
+            seen.add(c["dedup_key"])
             deduped.append(c)
 
         applied = []
         overrides = {}
         for candidate in deduped[:MAX_SPENDING_CHANGES]:
             applied.append(candidate)
-            overrides[candidate["group_key"]] = (candidate["action"], candidate["new_amount"])
+            overrides[candidate["event_id"]] = (candidate["action"], candidate["new_amount"])
             adjusted_timeline = self._forecast.build_timeline(context, overrides)
             if is_safe(adjusted_timeline):
                 return applied
