@@ -436,8 +436,8 @@ class ContextAgent:
         self._logger.log_turn(
             input_summary=f"ContextAgent call for request_id={request_id}, effort={effort}",
             output_summary=(
-                f"resolved {len(parsed.get('events', []))} events, "
-                f"{len(parsed.get('amendments', []))} amendments"
+                f"events={parsed.get('events', [])}, "
+                f"amendments={parsed.get('amendments', [])}"
             ),
         )
 

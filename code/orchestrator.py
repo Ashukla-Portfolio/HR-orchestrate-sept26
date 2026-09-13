@@ -103,7 +103,7 @@ class Orchestrator:
         self._context_agent = ContextAgent(
             client, self._data_loader, self._logger, self._usage_tracker, image_agent=self._image_agent
         )
-        self._plan_engine = PlanEngine(ForecastEngine())
+        self._plan_engine = PlanEngine(ForecastEngine(), logger=self._logger)
         self._explanation_agent = ExplanationAgent(client, self._logger, self._usage_tracker)
         self._validator = ValidatorAgent()
 

@@ -42,12 +42,21 @@ class PlanEngine:
     timelines (plain and with spending-change overrides applied).
     """
 
-    def __init__(self, forecast_engine: ForecastEngine):
+    def __init__(self, forecast_engine: ForecastEngine, logger=None):
         """
-        Input: forecast_engine (ForecastEngine)
+        Input:
+            forecast_engine (ForecastEngine)
+            logger (AgentLogger or None) - if provided, records the
+                baseline forecast figures, every candidate plan
+                considered, and which one won (or why none did), so
+                a run can actually be traced rather than only
+                inspected via its final output row. Optional and
+                defaults to None so existing callers/tests that don't
+                pass one still work; when None, logging is skipped.
         Output: None
         """
         self._forecast = forecast_engine
+        self._logger = logger
 
     def build_plan(self, context: dict) -> dict:
         """
@@ -58,6 +67,7 @@ class PlanEngine:
             payment_plan, earliest_date_for_full_payment,
             spending_changes_needed
         """
+        request_id = context["request"]["id"]
         request = context["request"]
         profile = context["profile"]
         request_date = as_date(request["date"])
@@ -69,6 +79,14 @@ class PlanEngine:
         baseline_timeline = self._forecast.build_timeline(context)
         amount_safe = self._forecast.amount_safe_to_pay(baseline_timeline, min_balance, requested_amount)
         earliest_full_date = self._forecast.earliest_safe_date(baseline_timeline, requested_amount, min_balance)
+
+        self._log(
+            f"PlanEngine baseline for request_id={request_id}",
+            f"requested_amount={requested_amount}, min_balance={min_balance}, "
+            f"payment_methods={sorted(payment_methods)}, amount_safe_to_pay={round(amount_safe, 2)}, "
+            f"earliest_safe_date={earliest_full_date}, "
+            f"baseline_min_balance={round(min(d['balance'] for d in baseline_timeline), 2)}",
+        )
 
         candidates = []
 
@@ -110,14 +128,26 @@ class PlanEngine:
                 changes=[],
             ))
 
+        max_installment_months = profile["max_installment_months"]
         for opt in context["payment_options"]:
             if opt["method"] not in payment_methods:
+                self._log(
+                    f"PlanEngine option {opt['option_id']} for request_id={request_id}",
+                    f"excluded: method={opt['method']!r} not in payment_methods={sorted(payment_methods)}",
+                )
                 continue
             payments = [(item["date"], item["amount"]) for item in opt["schedule"]]
             if not payments:
                 continue
+            if len(payments) > max_installment_months:
+                self._log(
+                    f"PlanEngine option {opt['option_id']} for request_id={request_id}",
+                    f"excluded: {len(payments)} payments exceeds max_installment_months={max_installment_months}",
+                )
+                continue
             adjusted = _apply_payments(baseline_timeline, payments)
-            if min(adjusted) >= min_balance:
+            plan_min = min(adjusted)
+            if plan_min >= min_balance:
                 candidates.append(self._make_candidate(
                     method="installments",
                     payments=payments,
@@ -126,12 +156,34 @@ class PlanEngine:
                     total_paid_override=opt["total_payable"],
                     payment_option_id=opt["option_id"],
                 ))
+                self._log(
+                    f"PlanEngine option {opt['option_id']} for request_id={request_id}",
+                    f"eligible and safe: {len(payments)} payments, min_balance_after={round(plan_min, 2)}, "
+                    f"total_payable={opt['total_payable']}",
+                )
+            else:
+                self._log(
+                    f"PlanEngine option {opt['option_id']} for request_id={request_id}",
+                    f"eligible but UNSAFE: {len(payments)} payments, min_balance_after={round(plan_min, 2)} "
+                    f"< min_balance={min_balance}",
+                )
 
         if candidates:
             best = min(candidates, key=self._sort_key)
+            self._log(
+                f"PlanEngine decision for request_id={request_id}",
+                f"winner: method={best['method']}, payment_option_id={best['payment_option_id']}, "
+                f"completes_by_deadline={best['completes_by_deadline']}, needs_changes={best['needs_changes']}, "
+                f"total_paid={best['total_paid']}, num_payments={best['num_payments']}, "
+                f"among {len(candidates)} eligible+safe candidate(s)",
+            )
             return self._finalize(best, amount_safe, earliest_full_date)
 
         if "full_payment" in payment_methods and earliest_full_date is not None:
+            self._log(
+                f"PlanEngine decision for request_id={request_id}",
+                "no eligible+safe candidate, falling back to wait",
+            )
             return {
                 "amount_safe_to_pay": round(amount_safe, 2),
                 "affordability_status": "affordable_later",
@@ -141,6 +193,10 @@ class PlanEngine:
                 "spending_changes_needed": "none",
             }
 
+        self._log(
+            f"PlanEngine decision for request_id={request_id}",
+            "no eligible+safe candidate and no wait option, falling back to not_recommended",
+        )
         return {
             "amount_safe_to_pay": round(amount_safe, 2),
             "affordability_status": "not_affordable",
@@ -149,6 +205,15 @@ class PlanEngine:
             "earliest_date_for_full_payment": earliest_full_date.isoformat() if earliest_full_date else "",
             "spending_changes_needed": "none",
         }
+
+    def _log(self, input_summary: str, output_summary: str) -> None:
+        """
+        Input: input_summary (str), output_summary (str)
+        Output: None. No-ops if this PlanEngine was constructed
+            without a logger.
+        """
+        if self._logger is not None:
+            self._logger.log_turn(input_summary=input_summary, output_summary=output_summary)
 
     def _make_candidate(self, method, payments, desired_date, changes, total_paid_override=None, payment_option_id=None):
         """

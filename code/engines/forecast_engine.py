@@ -66,6 +66,20 @@ def _as_date(value):
 as_date = _as_date
 
 
+def _signals_final_occurrence(description) -> bool:
+    """
+    Input: description (str or None) - an event's description field
+    Output: bool, True if the description signals this is the last
+        occurrence of its series (e.g. "Final employer payroll"),
+        meaning it should not be projected forward. Confirmed against
+        the real dataset: this exact signal appears for multiple
+        users, always on the latest known occurrence of an otherwise
+        ordinary monthly series, a deliberate "this income/expense
+        ends here" marker, not a category-specific label.
+    """
+    return description is not None and "final" in str(description).lower()
+
+
 def _add_one_month_same_day(d: date, anchor_day: int) -> date:
     """
     Input: d (date), anchor_day (int)
@@ -164,10 +178,17 @@ class ForecastEngine:
             future occurrences, projected monthly from the group's
             latest known settlement_date at the same day-of-month,
             for any month within the window not already covered by an
-            explicit row in the group.
+            explicit row in the group. Projects nothing at all if the
+            latest occurrence's description signals it's the last one
+            (see _signals_final_occurrence), e.g. "Final employer
+            payroll" means no further salary should be assumed.
         """
         dated = [(_as_date(e["settlement_date"]), e) for e in group]
         last_date, last_event = max(dated, key=lambda pair: pair[0])
+
+        if _signals_final_occurrence(last_event.get("description")):
+            return
+
         known_dates = {d for d, _ in dated}
         anchor_day = last_date.day
 
@@ -224,9 +245,15 @@ class ForecastEngine:
         Output: iterator of (date, signed_amount), projected forward
             from the group's latest occurrence at the average
             interval between its occurrences, using either the
-            group's average amount or the override amount.
+            group's average amount or the override amount. Projects
+            nothing at all if the latest occurrence's description
+            signals it's the last one (see _signals_final_occurrence).
         """
         dated = sorted(((_as_date(e["settlement_date"]), e) for e in group), key=lambda pair: pair[0])
+
+        if _signals_final_occurrence(dated[-1][1].get("description")):
+            return
+
         dates_only = [d for d, _ in dated]
         intervals = [(dates_only[i + 1] - dates_only[i]).days for i in range(len(dates_only) - 1)]
         avg_interval = max(1, round(sum(intervals) / len(intervals))) if intervals else 30
