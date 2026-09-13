@@ -41,7 +41,7 @@ the whole ongoing dining pattern, not just that one row.
 """
 
 import calendar
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import date, timedelta
 
 WINDOW_DAYS = 90
@@ -243,11 +243,26 @@ class ForecastEngine:
             request_date, window_end (date)
             override - None, or ("reduce_to", new_amount)
         Output: iterator of (date, signed_amount), projected forward
-            from the group's latest occurrence at the average
-            interval between its occurrences, using either the
-            group's average amount or the override amount. Projects
-            nothing at all if the latest occurrence's description
-            signals it's the last one (see _signals_final_occurrence).
+            from the group's true latest occurrence (whatever it was)
+            at the average interval between occurrences, using the
+            average amount, both computed from only the "repeating"
+            members of the group: events whose exact description
+            occurs more than once within it. A description that
+            occurs only once (e.g. an atypical bulk/stock-up
+            purchase, a description like "Bulk pantry shop" used
+            routinely across the dataset is unaffected, it's the
+            one-off wording that gets excluded, not the word "bulk"
+            itself) isn't evidence of the user's typical ongoing
+            pattern and shouldn't set the figure applied to every
+            future projected occurrence. Falls back to the full group
+            if fewer than 2 repeating members remain. The anchor date
+            to project forward from is always the group's true latest
+            occurrence, even if that specific one was a non-repeating
+            description, the next expected visit still follows from
+            when the user actually last went, regardless of whether
+            that visit's amount was typical. Projects nothing at all
+            if the latest occurrence's description signals it's the
+            last one (see _signals_final_occurrence).
         """
         dated = sorted(((_as_date(e["settlement_date"]), e) for e in group), key=lambda pair: pair[0])
 
@@ -255,14 +270,21 @@ class ForecastEngine:
             return
 
         dates_only = [d for d, _ in dated]
-        intervals = [(dates_only[i + 1] - dates_only[i]).days for i in range(len(dates_only) - 1)]
+
+        desc_counts = Counter(e.get("description") for _, e in dated)
+        representative = [(d, e) for d, e in dated if desc_counts[e.get("description")] >= 2]
+        if len(representative) < 2:
+            representative = dated
+
+        rep_dates = [d for d, _ in representative]
+        intervals = [(rep_dates[i + 1] - rep_dates[i]).days for i in range(len(rep_dates) - 1)]
         avg_interval = max(1, round(sum(intervals) / len(intervals))) if intervals else 30
 
         direction = dated[-1][1]["direction"]
         if override and override[0] == "reduce_to":
             signed_amount = abs(override[1]) if direction == "credit" else -abs(override[1])
         else:
-            amounts = [self._signed_amount(e) for _, e in dated]
+            amounts = [self._signed_amount(e) for _, e in representative]
             signed_amount = sum(amounts) / len(amounts)
 
         cursor = dates_only[-1]
