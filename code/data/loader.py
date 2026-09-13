@@ -35,6 +35,12 @@ AMOUNT_SIMILARITY_TOLERANCE = 0.15
 # no consistent day of the month).
 FREQUENT_CATEGORY_MIN_OCCURRENCES = 3
 
+# Tie-break for which copy of an exact duplicate to keep: settled over
+# scheduled over pending, matching Conflict Resolution rule 3 ("a
+# settled event over an estimate or forecast"). Anything else sorts
+# last on this scale.
+STATUS_PRECEDENCE = {"settled": 0, "scheduled": 1, "pending": 2}
+
 
 class MissingExchangeRateError(Exception):
     """Raised when no exchange rate exists for a currency pair on or before the requested date."""
@@ -94,6 +100,46 @@ def _has_monthly_pattern(group_events: list[dict]) -> bool:
                 continue
             return True
     return False
+
+
+def _detect_duplicate_event_ids(events: list[dict]) -> set[str]:
+    """
+    Input: events (list[dict]), all financial_events rows for one user
+    Output: set[str], event_ids to discard as duplicates
+
+    A deterministic backstop for "ignore duplicate records" (per the
+    90-Day Safety Check section). ContextAgent's own LLM-based dedup
+    judgment has no Python-level verification behind it, this catches
+    the mechanical case directly: events sharing identical category,
+    direction, amount, AND event_date are almost certainly the same
+    transaction recorded twice, a genuine recurring bill has its own
+    distinct date each time, so an exact date match alongside amount
+    match is not something a legitimate recurring series would
+    produce by coincidence.
+
+    Within a duplicate group, keeps one copy (settled over scheduled
+    over pending, per Conflict Resolution rule 3, "a settled event
+    over an estimate or forecast"; ties broken by original row order)
+    and flags the rest for removal.
+    """
+    groups: dict[tuple, list[dict]] = defaultdict(list)
+    for event in events:
+        key = (
+            event.get("category"),
+            event.get("direction"),
+            event.get("amount"),
+            event.get("event_date"),
+        )
+        groups[key].append(event)
+
+    duplicate_ids: set[str] = set()
+    for group_events in groups.values():
+        if len(group_events) < 2:
+            continue
+        ranked = sorted(group_events, key=lambda e: STATUS_PRECEDENCE.get(e.get("status"), 99))
+        for event in ranked[1:]:
+            duplicate_ids.add(event["event_id"])
+    return duplicate_ids
 
 
 def _classify_recurrence(events: list[dict]) -> dict[str, str | None]:
@@ -266,8 +312,9 @@ class DataLoader:
         """
         Input: user_id (str)
         Output: list[dict], all financial_events.csv rows for this
-            user, in original order, each with is_recurring (bool)
-            and recurrence_pattern (str or None) attached, from
+            user, in original order, EXCLUDING exact duplicates (see
+            _detect_duplicate_event_ids), each with is_recurring
+            (bool) and recurrence_pattern (str or None) attached, from
             _classify_recurrence (category-level classification, see
             its docstring). financial_events.csv has no request_id
             column, so this is deliberately unfiltered by request,
@@ -276,6 +323,15 @@ class DataLoader:
         """
         matches = self._events[self._events["user_id"] == user_id]
         records = matches.to_dict(orient="records")
+
+        duplicate_ids = _detect_duplicate_event_ids(records)
+        if duplicate_ids:
+            self._logger.log_turn(
+                input_summary=f"deduplicate financial_events for user_id={user_id}",
+                output_summary=f"removed {len(duplicate_ids)} duplicate event_id(s): {sorted(duplicate_ids)}",
+            )
+            records = [r for r in records if r["event_id"] not in duplicate_ids]
+
         patterns = _classify_recurrence(records)
         for record in records:
             record["recurrence_pattern"] = patterns[record["event_id"]]

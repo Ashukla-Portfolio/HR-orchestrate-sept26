@@ -141,7 +141,7 @@ event_139,user_02,expense,Household insurance,insurance,debit,1132400,IDR,2025-0
 event_140,user_02,expense,Course tuition,education,debit,3040000,IDR,2025-07-09,2025-07-09,settled,,fixed,
 event_141,user_02,expense,Clinic payment,healthcare,debit,1538498.1,IDR,2025-07-11,2025-07-11,settled,,fixed,
 event_142,user_02,expense,Cinema and events,entertainment,debit,1352563.79,IDR,2025-07-15,2025-07-15,settled,,reducible,670700
-event_143,user_02,subscription,Shared storage plan,cloud_storage,debit,369550,IDR,2025-07-13,2025-07-13,settled,,stoppable,
+event_143,user_02,subscription,Home repair reserve,cloud_storage,debit,369550,IDR,2025-07-13,2025-07-13,settled,,stoppable,
 event_144,user_02,expense,Home repair reserve,housing,debit,3534000,IDR,2025-08-04,2025-08-04,settled,,fixed,
 event_145,user_02,expense,Grocery delivery,groceries,debit,2477697.53,IDR,2025-02-10,2025-02-10,settled,,fixed,
 event_146,user_02,expense,Bulk pantry shop,groceries,debit,1667911.86,IDR,2025-02-20,2025-02-20,settled,,fixed,
